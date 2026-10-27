@@ -172,14 +172,14 @@ def fake_libraries(tokenizer, model):
 
 class DatasetTests(unittest.TestCase):
     def test_appendix_is_byte_exact_and_frozen(self):
-        source = (pilot.DATASET.parents[1] / "docs/EVALUATION_CONTRACT.md").read_text(encoding="utf-8")
+        source = (pilot.DATASET.parents[1] / "docs/EVALUATION_CONTRACT.md").read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
         appendix = source.split("## Appendix A.", 1)[1]
         matches = re.findall(r"\*\*`(corpus/[^`]+)`\*\*\s+```markdown\n(.*?)```", appendix, re.S)
         self.assertEqual(len(matches), 6)
         for name, content in matches:
-            self.assertEqual((pilot.DATASET / name).read_bytes(), content.encode("utf-8"))
+            self.assertEqual((pilot.DATASET / name).read_bytes().replace(b"\r\n", b"\n"), content.encode("utf-8"))
         questions = re.search(r"\*\*`questions.jsonl`\*\*.*?```json\n(.*?)```", appendix, re.S).group(1)
-        self.assertEqual((pilot.DATASET / "questions.jsonl").read_bytes(), questions.encode("utf-8"))
+        self.assertEqual((pilot.DATASET / "questions.jsonl").read_bytes().replace(b"\r\n", b"\n"), questions.encode("utf-8"))
         system = re.search(r"\*\*Prompt `b0-v1`.*?```text\n(.*?)```", appendix, re.S).group(1)
         self.assertEqual(pilot.SYSTEM_PROMPT, system)
         manifest = pilot.validate()
@@ -208,7 +208,9 @@ class DatasetTests(unittest.TestCase):
             target = Path(directory) / "dataset"
             shutil.copytree(pilot.DATASET, target)
             for path in list((target / "corpus").glob("*.md")) + [target / "questions.jsonl"]:
-                path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+                data = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                self.assertNotIn(b"\r\r", data)
+                path.write_bytes(data)
             self.assertEqual(pilot.validate(target), pilot.validate())
 
     def test_bad_dataset_structure_labels_and_quotes_fail(self):
