@@ -1,0 +1,25 @@
+{
+  "corpus_sha256": "88a1051b324f208989863fcb1c3fa33ba18c3b8bb9e49a275c1cae9085d34136",
+  "dataset_sha256": "f6aa0b91d0b71c4f456aab1b59f482daf812674f677c600eb42ddf18e856890d",
+  "documents": 6,
+  "expected_outcomes": {
+    "ABSTAIN": 3,
+    "ANSWER": 11,
+    "DISCLOSE_CONFLICT": 2
+  },
+  "files": {
+    "corpus/board_minutes_2026_05.md": "170433687ad561d0e312e96bb3916f7678afeb681fd6dd54000a6a52b516a029",
+    "corpus/equipment_handbook.md": "5ed7303257cbc4a16b1de08b5435a9a4562e2aac25e450f5f3bc0ccf2664a2c4",
+    "corpus/safety_bulletin.md": "b3e06c0ed7af505b5f29f6309e6df4286e99a274dcda453eba5410c8fdc6e110",
+    "corpus/travel_policy.md": "3159318bec02750ee72ec9357a9080999af2ff3bfbbb0af9af4a5a8b3eb23788",
+    "corpus/travel_update_2026_03.md": "d6cef589352b36aea66db051101b8b77017dc6ca51ce0b2681a932ee15f8a86c",
+    "corpus/vendor_notes.md": "eb0afb77e2d11a7b33f018270b031fde5de65296f0ca3b1f5d6603413cd1f3aa",
+    "questions.jsonl": "00da008449d00da7be9f4a61eb74b996029b6636e6258c7da85f5b6708e32faa"
+  },
+  "format": "b0-freeze-v1",
+  "gold_evidence": 17,
+  "items": 16,
+  "label_status": "pending_founder_acceptance",
+  "prompt_sha256": "2b2e09c9f91de4c10f494f85a155d358bce711703402d2628f2595e30d9ee8e4",
+  "prompt_version": "b0-v1"
+}
