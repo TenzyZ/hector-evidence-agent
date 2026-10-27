@@ -1,7 +1,7 @@
 # Hector Evidence Agent — Architecture
 
-Status: **Phase 01 specification, awaiting founder approval.** Nothing in this file is implemented yet.
-Volatile facts (model, provider, price) were verified on **2026-10-27** against the sources in §13.
+Status: **Phase 01 specification, revision 3, awaiting founder approval.** Revision 2 made Google Colab with the BF16 checkpoint the primary B0 path; revision 3 repairs the documented review findings. Nothing in this file is implemented yet.
+Volatile facts (model, runtime, provider, price) were verified on **2026-10-27** against the sources in §13.
 
 Read with: [PROJECT.md](PROJECT.md) (why and what), [docs/EVALUATION_CONTRACT.md](docs/EVALUATION_CONTRACT.md) (how we measure), [docs/PHASE_PLAN.md](docs/PHASE_PLAN.md) (build order).
 
@@ -21,6 +21,8 @@ Hector checks that claims are **supported by the uploaded documents**. It does n
 
 Out of scope for the MVP: PDF/DOCX/OCR, images (Glimmer is multimodal, but we do not use that), embeddings or vector databases, multi-agent orchestration, fine-tuning, accounts, persistence across sessions. See PROJECT.md §6.
 
+The **B0 pilot** (§5.8) comes before the full system. It runs Muse Glimmer 30B in BF16 on a Google Colab GPU against a fixed 16-question dataset, to measure the model alone. It uses none of M1–M7.
+
 ## 2. System diagram
 
 ```text
@@ -31,15 +33,15 @@ Out of scope for the MVP: PDF/DOCX/OCR, images (Glimmer is multimodal, but we do
  user --question>|  M4 Agent loop ----+ search_passages / read_passage (read-only, own corpus only)    |
                  |      |  ^                                                                         |
                  |      v  | one tool call per turn                                                  |
-                 |  M3 Model adapter ===== HTTPS, OpenAI-compatible =====> Muse Glimmer 30B           |
-                 |      |                                                  (Together AI serverless)   |
+                 |  M3 Model adapter ========= model backend (§5.3) =====> Muse Glimmer 30B           |
+                 |      |                                                  (backend: Phase 04)        |
                  |      v submit_answer(claims + citations)                                           |
                  |  M5 Verifier: identity -> quote span -> numbers -> judge (via M3, isolated context) |
                  |      v                                                                             |
                  |  M6 Decision policy --> AnswerResult --> M7 CLI / Web UI --> user                  |
                  |                              \--> trace (JSONL, local only)                        |
                  +------------------------------------------------------------------------------------+
-   Untrusted: uploaded files, filenames, questions, all model output, everything the provider returns.
+   Untrusted: uploaded files, filenames, questions, all model output, everything the model backend returns.
 ```
 
 ## 3. Data flow
@@ -61,7 +63,8 @@ The verifier never feeds back into the agent loop: there is no revise cycle. So 
 | Upload → M1 | file bytes, filename | extension allowlist, size/count limits, strict UTF-8, NUL rejection. Filename is display-only and never used as a path. Text is stored in SQLite, never written to disk as a file. |
 | Corpus text → model | document content (may contain prompt injection) | delimited as `<untrusted_passages>` in tool results; never placed in the system prompt; tools are read-only over the session's own corpus, so a successful injection can only change answer text, never cause an effect. Output still passes M5. |
 | Model output → harness | tool names, arguments, claims | closed tool allowlist; harness-side schema validation; bounded retries; `chunk_id` must be in the observed set; quotes re-checked against stored text. |
-| Hector → provider | outbound HTTPS | API key from env only, never logged or sent to the client. Documents and questions leave the machine: disclosed in the UI. |
+| Hector → model backend | prompts and documents sent to wherever the model runs | **B0:** the model runs in-process on a Google-managed Colab VM. No API key; the corpus is synthetic. **HTTP backends (Phase 04+):** API key from env only, never logged or sent to the client. In every case documents and questions leave the user's machine, and the UI discloses this. |
+| Colab notebook → Google Drive | B0 result files | Drive is mounted only to save results. Mounting gives the notebook access to the whole Drive (S17), so the notebook runs only reviewed code from this repository at a pinned commit. |
 | Output → browser | claim text, quotes, filenames | rendered as escaped text: no raw HTML, no auto-linked URLs. |
 | Public deployment | anonymous users | per-session isolated corpus, rate limit, global daily spend cap, no trace persistence in public mode. |
 
@@ -129,27 +132,30 @@ Each module lists purpose, responsibilities, inputs → outputs, errors, accepta
 
 ### 5.3 M3 Model adapter [`hector/model.py`]
 
-- **Purpose:** one small, provider-neutral function that calls an OpenAI-compatible `/v1/chat/completions` endpoint serving Muse Glimmer, and returns a normalized response.
+- **Purpose:** one small function that sends a chat request to Muse Glimmer and returns a normalized response, wherever the model runs.
 - **Interface:** `chat(messages, tools, *, max_tokens, timeout_s) -> ModelResponse`
   - `messages`: OpenAI chat format (`system`, `user`, `assistant` with `tool_calls`, `tool` with `tool_call_id`).
-  - `tools`: OpenAI function schemas. Glimmer's server parses its native ATEM format into `tool_calls` (S3, S4).
-  - `ModelResponse{content: str|None, tool_calls: list[{id, name, arguments_json}], finish_reason, input_tokens, output_tokens, cost_usd, latency_ms}`.
-- **Request body:**
-  - `model`, `messages`, `tools`, `max_tokens`, `temperature=1.0`, `top_p=0.95`, `top_k=64`, `stream=false`.
-  - Use the published sampling defaults. Do not run greedy: Meta and Together both report that greedy decoding loops on this model (S3).
-  - Never send `<|eom|>` as a stop token.
-  - Do not send `tool_choice="required"`: some servers reject it (S3). Force termination by offering only `submit_answer` on the last turn.
-- **Reasoning:** Glimmer returns its chain of thought separately, as `message.reasoning` on vLLM and `reasoning_content` on SGLang/llama.cpp (S3). The adapter ignores both fields and does not persist them. Reasoning tokens count toward `max_tokens`. `finish_reason=="length"` with empty content is reported as `TRUNCATED`.
-- **Configuration (env):**
-  - `HECTOR_MODEL_BASE_URL` (default `https://api.together.xyz/v1`)
-  - `HECTOR_MODEL_NAME` (default `meta-models/Muse-Glimmer-30B`)
-  - `HECTOR_MODEL_API_KEY` (required, never logged)
-  - `HECTOR_PRICE_IN_PER_M` (default `0.35`) and `HECTOR_PRICE_OUT_PER_M` (default `1.50`)
-- **Cost:** `cost_usd = in/1e6*PRICE_IN + out/1e6*PRICE_OUT`. If the provider omits `usage`, cost is `null` and the run is flagged.
+  - `tools`: OpenAI function schemas.
+  - `ModelResponse{content: str|None, tool_calls: list[{id, name, arguments_json}], finish_reason, input_tokens, output_tokens, cost_usd: float|null, latency_ms}`. `cost_usd` is `null` when the backend is not billed per token.
+- **Backends.** B0 does not use M3: it calls Transformers directly (§5.8). The agent loop (Phase 04) needs tool calls, so its backend is a founder decision taken in Phase 04, from these options:
+  1. **An OpenAI-compatible server on the Colab GPU.** This means vLLM or SGLang with Glimmer's tool-call and reasoning parsers, which turn native ATEM output into `tool_calls` server-side (S3). Not yet verified on Colab.
+  2. **In-process Transformers.** No server, but the harness must parse ATEM tool calls itself.
+  3. **A hosted provider** (Together AI, §8). This is a fallback that needs separate approval, an API key and a spend cap.
+
+  Whichever backend is chosen must pass this module's tests.
+- **Sampling (all backends):** `temperature=1.0`, `top_p=0.95`, `top_k=64`, the published defaults (S4). Do not run greedy: Meta reports that greedy decoding loops on this model (S3). Stop on `<|eot|>` and `<|end_of_text|>`, never on `<|eom|>`. Do not send `tool_choice="required"`: some servers reject it (S3). Force termination by offering only `submit_answer` on the last turn.
+- **Reasoning:** Glimmer writes private reasoning in an `assistant to=self` message before its user-facing `to=user` message (S4). Servers return the reasoning separately: `message.reasoning` on vLLM, `reasoning_content` on SGLang/llama.cpp (S3). The adapter ignores it and never persists it. Reasoning tokens count toward `max_tokens`. `finish_reason=="length"` with empty content is reported as `TRUNCATED`.
+- **HTTP backends (options 1 and 3):**
+  - Transport: stdlib `urllib.request`, which needs no dependency.
+  - Configuration from env:
+    - `HECTOR_MODEL_BASE_URL`;
+    - `HECTOR_MODEL_NAME` (default `meta-models/Muse-Glimmer-30B`);
+    - `HECTOR_MODEL_API_KEY`, for hosted backends only, never logged;
+    - for per-token billing, `HECTOR_PRICE_IN_PER_M` and `HECTOR_PRICE_OUT_PER_M`.
+  - Cost: `cost_usd = in/1e6*PRICE_IN + out/1e6*PRICE_OUT`. If a billed backend omits `usage`, cost is `null` and the run is flagged.
   - `shortcut: cached-input discount ignored (overestimates cost slightly), revisit only if cost becomes material.`
-- **Transport:** stdlib `urllib.request`, which needs no dependency.
-  - `shortcut: non-streaming with 120 s timeout; switch to SSE streaming if Phase 04 smoke test shows timeouts (Meta recommends streaming for long reasoning).`
-- **Errors and retry policy:**
+  - `shortcut: non-streaming with 120 s timeout; switch to SSE streaming if the Phase 04 smoke test shows timeouts (Meta recommends streaming for long reasoning).`
+- **Errors and retry policy (HTTP backends):**
 
   | Code | Trigger | Retry |
   |---|---|---|
@@ -161,7 +167,12 @@ Each module lists purpose, responsibilities, inputs → outputs, errors, accepta
   | `MALFORMED_RESPONSE` | non-JSON, no `choices` | none |
   | `TRUNCATED` | `finish_reason=="length"` | none (the loop counts it as an invalid step) |
 
-- **Acceptance:** unit tests against a local fake HTTP server cover every row above, plus usage/cost arithmetic and header hygiene (the key never appears in logs or exceptions). The Phase 04 smoke test records the real provider's behaviour for `top_k`, the reasoning field name, `usage`, and `chat_template_kwargs.reasoning_strength`.
+- **In-process errors:** generation exceptions map to `UNAVAILABLE`, expiry of `MODEL_TIMEOUT_S` to `TIMEOUT`, malformed ATEM message structure to `MALFORMED_RESPONSE`, and token-limit termination to `TRUNCATED`, with the corresponding retry policy above. Parsed tool names and argument strings go to M4 for §5.4 validation; malformed arguments must not be repaired silently. HTTP status and header rules do not apply to in-process mode.
+- **Acceptance (Phase 04, no real model in unit tests):**
+  - HTTP mode: a local fake HTTP server covers every error row above, usage/cost arithmetic and header hygiene (the key never appears in logs or exceptions).
+  - In-process mode: stubbed generation covers ATEM structured tool-call parsing into `ModelResponse`, reasoning exclusion, malformed messages, generation exceptions, timeouts, truncation and the specified retry/stop behavior.
+  - Both modes: equivalent responses yield the same normalized `ModelResponse` fields and observable M4 protocol behavior. Adapter/loop tests cover valid calls, malformed argument JSON, schema violations (missing/extra fields, wrong types), unknown tools and multiple calls under §5.4; invalid inputs never execute a tool.
+  - The smoke test records the chosen backend's behaviour for `top_k`, the reasoning field name, `usage`, and `reasoning_strength`.
 
 ### 5.4 M4 Agent loop and tools [`hector/agent.py`]
 
@@ -324,6 +335,103 @@ Answer outcome (config C):
   - Questions are 3–500 chars.
 - **Acceptance:** the CLI end-to-end test runs on fixtures with a fake model. The UI is checked manually against a script in Phase 06.
 
+### 5.8 B0 pilot on Google Colab [`hector/pilot_b0.py`, `hector/b0_colab.py`, `notebooks/b0_colab.ipynb`]
+
+- **Purpose:** measure Muse Glimmer 30B alone on the fixed B0 dataset ([EVALUATION_CONTRACT §2a](docs/EVALUATION_CONTRACT.md#2a-b0-pilot-muse-glimmer-alone-phase-01b)).
+  - Pretrained BF16 weights, evaluation only, no fine-tuning.
+  - Produces every artifact needed to re-score the run without the GPU.
+  - Implemented in Phase 01b. Nothing here has run yet.
+- **Flow:**
+
+  ```text
+  canonical repository @ exact commit ──> Colab notebook (thin driver)
+                                              │
+                    B0-0 environment ── B0-1 tokenizer ── P resource preflight ──(fail: stop, no download)
+                                              │
+                         download BF16 checkpoint @ pinned revision (VM disk only)
+                                              │
+                    B0-2 load smoke (BF16, one GPU, placement and dtype asserted)
+                                              │
+                    B0-3 generation smoke (q01) ── B0-4 full run (16 items, frozen dataset)
+                                              │
+              per-item record: final answer text, parse, tokens, latency, peak VRAM (no reasoning text)
+                                              │
+              copied to Google Drive after every item ──> founder copies the reviewed run into Git
+                                              │
+              offline deterministic scoring on any machine ──> summary + report
+  ```
+
+- **Where each concern lives:**
+
+  | Concern | Module | Runs on | torch / GPU |
+  |---|---|---|---|
+  | Dataset loading, validation and freeze hashes; prompt construction; output parsing; scoring; summary; review sheet | `hector/pilot_b0.py` | laptop and Colab | no (stdlib) |
+  | Resource preflight; model loading; generation; GPU metrics; writing item records | `hector/b0_colab.py` | Colab | yes (imported only there) |
+  | Checkout, installs, Drive mount, calls to the two modules | `notebooks/b0_colab.ipynb` | Colab | no own logic |
+
+  The notebook holds no evaluation logic, so tests cover all of it locally with stubs. B0 runs in-process, with no HTTP server.
+
+- **Code identity:**
+  - The notebook's first cell takes an exact commit SHA of this public repository, clones it and checks that commit out.
+  - It stops if `git rev-parse HEAD` differs or the tree is dirty.
+  - The private historical repository is never used.
+- **Dependencies:**
+  - Colab's preinstalled PyTorch is used as installed, and its version and CUDA build are recorded. Reinstalling risks a CUDA mismatch.
+  - Only `transformers` and `accelerate` are installed, pinned to exact versions in the notebook's single install cell.
+  - Transformers 5.15 or later is required for the native Muse Glimmer path (S15). The pin is chosen in Phase 01b; 5.20.2 is the version observed to work for the tokenizer and processor (L2).
+- **Resource preflight P** (fail-closed, on the *current* runtime, before any checkpoint download or model loading):
+  - **Checks**, with thresholds in §7:
+    - CUDA is available and `torch.cuda.is_bf16_supported()` is true.
+    - Free VRAM ≥ `B0_MIN_FREE_VRAM_GIB`.
+    - Measured available host RAM ≥ `B0_MIN_HOST_RAM_GIB`; an unavailable measurement fails the check.
+    - Free disk ≥ the checkpoint's `*.safetensors` total from repository metadata (~60 GB, S15) plus 20 GiB.
+    - Python ≥ 3.12 (this repository's floor; Meta's is 3.10, S15).
+    - `transformers` equals the pin.
+    - The model repository answers `model_info` without a token (it is not gated, S15).
+  - **Host-RAM threshold:** a provisional, conservative project heuristic, not a Meta-certified minimum or proof that loading will succeed. Any alternative threshold requires an explicit, documented founder decision.
+  - **Recorded:** GPU name, compute capability, total and free VRAM, total and available host RAM, disk, Python, PyTorch with CUDA build, Transformers, Accelerate, and the resolved repository commit SHA.
+  - **Compute units:** the founder types the Colab balance shown before and after the run. It is not machine-readable; `null` if not entered.
+  - **On failure:** any failed check ends the run as `PREFLIGHT_FAILED:<check>` with no download and no fallback.
+  - **Stale observations:** an earlier session's numbers (L2) never satisfy P.
+- **Model loading:**
+  - Calls: `AutoTokenizer.from_pretrained(MODEL_ID, revision=SHA)` and `AutoModelForCausalLM.from_pretrained(MODEL_ID, revision=SHA, dtype=torch.bfloat16, device_map={"": 0})`. This is Meta's Transformers recipe (S3), pinned to one GPU so nothing can be offloaded silently to CPU or disk.
+  - **Assertions after loading:** every parameter is on `cuda:0`, else `LOAD_PLACEMENT`; every floating-point parameter is `bfloat16`, else `LOAD_DTYPE`.
+  - **Recorded:** parameter count, the attention implementation Transformers selected (default backend; flash-attention is not installed), load time, and peak allocated and reserved VRAM.
+  - **Cache:** `HF_HOME=/content/hf` on the VM's local disk (about 60 GB, S15). It is deleted with the VM and is never Google Drive or the repository.
+  - **Out of memory while loading:** `LOAD_OOM` and the run is blocked. Do not change precision or loading method to make it fit.
+  - **Open item, confirmed in stage B0-2:**
+    - The Hugging Face model card loads the same checkpoint with `AutoProcessor` + `AutoModelForMultimodalLM` (S16).
+    - Meta's Transformers page uses `AutoModelForCausalLM` (S3). B0 is text-only and uses the latter.
+    - B0-2 records whether the ~1.8B-parameter vision encoder (S16) is loaded, and its VRAM cost.
+    - If `AutoModelForCausalLM` cannot load the checkpoint, Phase 01b stops and asks. A class change is recorded, never silent.
+- **Generation:**
+  - One call per item, in file order, batch size 1.
+  - Prompt: `tok.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)`. The template's default reasoning strength is `high`; the hash of the rendered prompt is recorded.
+  - Call: `model.generate(**enc, do_sample=True, temperature=1.0, top_p=0.95, top_k=64, max_new_tokens=B0_MAX_NEW_TOKENS, max_time=B0_MAX_TIME_S, eos_token_id=[<|eot|>, <|end_of_text|>])`.
+  - `torch.manual_seed(B0_SEED + item_index)` runs before each call. This aids repeatability on the same software and hardware; it is not a determinism guarantee.
+  - Per item: reset the GPU peak-memory counters; record latency, input and output token counts, and peak allocated and reserved VRAM.
+- **Separating the answer from reasoning:**
+  - Decode the generated tokens *with* special tokens and split them into messages at `<|start|>`. The first message's header is the text before its `<|message|>`, because the prompt ends with `<|start|>assistant`.
+  - The **final answer** is the body of the last assistant message addressed to `user`, or with no recipient.
+  - `to=self` messages are reasoning. Only their token count is kept; their text is never written anywhere.
+  - The message structure (headers and token counts) is stored so that format problems can be debugged without storing reasoning.
+  - No user-facing message gives `NO_FINAL_MESSAGE`. No end-of-turn token gives `TRUNCATED`, or `TIMEOUT` if `max_time` ran out.
+  - Stage B0-3 confirms the exact header strings on real output.
+- **Failure handling:**
+  - Item-level failures (`OOM`, `TRUNCATED`, `TIMEOUT`, `NO_FINAL_MESSAGE`) are recorded and the run continues. After an out-of-memory error, free the CUDA cache first; two consecutive OOMs abort the run.
+  - Nothing is retried with changed settings.
+  - Failed items are never scored as abstentions.
+- **Persistence and interruption:**
+  - The run id is `b0-<UTC>-<6 hex>`. `run.json` is written first, with `status: "started"`.
+  - Each item record is appended to the VM disk, flushed, and copied to `MyDrive/hector-b0/<run_id>/` after every item. At the end, `status` becomes `complete` or `aborted`; an interrupted run keeps `started`.
+  - Runs are never resumed or merged. An interrupted run stays on record as incomplete, and a new attempt gets a new id.
+  - At the end, the notebook releases the model from GPU memory. Model files are never copied to Drive.
+- **Scoring is offline:** `python -m hector.pilot_b0 score <run_dir>` recomputes every score from the item records and the frozen dataset on any machine. It must reproduce `summary.json` byte for byte.
+- **Back into Git:** after review, the founder copies the run directory into `docs/eval/pilot-b0/` on the Phase 01b branch. It is public: the corpus is synthetic, and the records contain no reasoning text and no credentials.
+- **Fallbacks** (separate founder approval; never reported as BF16 B0):
+  - a quantized checkpoint (S3, S15);
+  - a hosted provider (§8).
+
 ## 6. Data contracts
 
 `AnswerResult` is the single contract shared by the CLI, UI, and evaluation:
@@ -346,6 +454,8 @@ Answer outcome (config C):
   "versions": {"agent_prompt": "…", "judge_prompt": "…", "model": "…", "base_url_host": "…", "git_commit": "…"}
 }
 ```
+
+`usage.cost_usd` is `null` when the backend is not billed per token. `versions.base_url_host` is `null` when the backend is not reached over HTTP.
 
 The trace is one JSON object per run: `AnswerResult` plus `steps[{step, tool, arguments, result_chunk_ids, error, input_tokens, output_tokens, latency_ms}]`. It is written by the CLI/eval to a local JSONL file. It never contains the API key or reasoning text. Public mode writes no traces.
 
@@ -371,42 +481,54 @@ Single source of truth; implemented as constants in `hector/config.py`.
 | `MODEL_TIMEOUT_S` | 120 | per call |
 | transient retries | 2 (2 s, 8 s) | per call |
 | `RUN_DEADLINE_S` | 300 | agent + verification |
-| `max_tokens` agent / judge | 8,192 / 4,096 | Together caps output at 32,768 per request (S3) |
+| `max_tokens` agent / judge | 8,192 / 4,096 | reasoning counts toward it; hosted Together caps output at 32,768 per request (S3) |
 | sampling | `temperature 1.0`, `top_p 0.95`, `top_k 64` | S3, S4 |
 | `JUDGE_CONCURRENCY` | 3 | |
-| `HECTOR_DAILY_BUDGET_USD` | 5 (public mode) | in-process estimate; refuse new runs above it |
+| `HECTOR_DAILY_BUDGET_USD` | 5 (public mode, per-token backends) | in-process estimate; refuse new runs above it |
+| `B0_MIN_FREE_VRAM_GIB` | 72 | Meta's ~72 GB serving figure (S3) read as GiB for margin; the weights alone are ~60 GB (S15) |
+| `B0_MIN_HOST_RAM_GIB` | 24 | provisional project heuristic for available host RAM; see §5.8, not a Meta-certified minimum or a loading guarantee |
+| `B0_MAX_NEW_TOKENS` | 8,192 | same as the agent; reasoning counts toward it |
+| `B0_MAX_TIME_S` | 900 | per item, `generate(max_time=…)` |
+| `B0_SEED` | 20261027 | per-item seed = `B0_SEED` + item index |
 | UI rate limit | 10 questions / 10 min / session | |
 
 ## 8. Serving decision
 
 | Option | Evidence (S#) | Fit |
 |---|---|---|
-| **Together AI serverless** `meta-models/Muse-Glimmer-30B` | Listed as the hosted provider in Meta's deploy guide. $0.35 / 1M input ($0.04 cached), $1.50 / 1M output, FP8, 128K+ context, tool calling via chat template, 32,768 output-token cap (S3, S6) | **Chosen.** Pay per token, nothing to provision, OpenAI wire format. No hackathon credits were found for Together, so it is paid from the founder's own account. |
-| Baseten dedicated | Library deployment: BF16 on 1×H100 via vLLM + DFlash (S8). H100 listed at $0.10833/min (~$6.50/h) (S9). Glimmer is not in Baseten's per-token Model API list (S9). Hackathon: $100 credits + 2M TPM to *select* participants (S14) | **Fallback 1** if Together is unavailable and the founder holds Baseten credits. Same adapter; change base URL and model. Watch cold starts. |
-| Modal + vLLM | Meta's vLLM recipe: `vllm/vllm-openai:muse-glimmer`, `--tool-call-parser muse_glimmer --reasoning-parser muse_glimmer`. Needs ~72 GB VRAM in BF16 (S3). H100 $0.001097/s (~$3.95/h) (S10). $100 credits to select participants (S14) | **Fallback 2.** Most setup work; requires downloading weights (needs separate authorization). |
-| OpenRouter `meta/muse-glimmer-30b` | Two upstream providers listed ($0.35/$1.50 and $0.30/$1.20) (S12) | Per-token alternative if a Together account is blocked. Routing adds variance. |
+| **Google Colab GPU, BF16 checkpoint, in-process Transformers** | `meta-models/Muse-Glimmer-30B`: BF16 safetensors with tokenizer, chat template and processor config, ~60 GB, Apache 2.0, no API key and not gated (S15, S16). Needs ~72 GB VRAM to serve; RTX PRO 6000 (96 GB) is listed BF16 hardware (S3). One founder Colab session showed an RTX PRO 6000 Blackwell with 94.43 GiB free (L2). Colab does not guarantee GPU types, usage limits or VM lifetime (S17) | **Chosen for B0** (founder decision, 2026-10-27). No per-token charges; cost is the founder's Colab plan and compute units. Each run must pass preflight P (§5.8) on the runtime it actually gets. |
+| Together AI serverless `meta-models/Muse-Glimmer-30B` | $0.35 / 1M input ($0.04 cached), $1.50 / 1M output, FP8, 128K+ context, tool calling via chat template, 32,768 output-token cap (S3, S6; re-checked 2026-10-27) | **Fallback; needs separate approval.** It serves FP8, not BF16, so its results are labelled separately and never pooled with B0. A candidate agent backend for Phase 04 (§5.3, option 3). |
+| Baseten dedicated | Library deployment: BF16 on 1×H100 via vLLM + DFlash (S8). H100 listed at $0.10833/min (~$6.50/h) (S9). Glimmer is not in Baseten's per-token Model API list (S9). Hackathon: $100 credits + 2M TPM to *select* participants (S14) | Alternative if Colab capacity is unavailable and the founder holds Baseten credits. |
+| Modal + vLLM | Meta's vLLM recipe: `vllm/vllm-openai:muse-glimmer`, `--tool-call-parser muse_glimmer --reasoning-parser muse_glimmer`. Needs ~72 GB VRAM in BF16 (S3). H100 $0.001097/s (~$3.95/h) (S10). $100 credits to select participants (S14) | Alternative; most setup work. |
+| OpenRouter `meta/muse-glimmer-30b` | Two upstream providers listed ($0.35/$1.50 and $0.30/$1.20) (S12) | Per-token alternative. Routing adds variance. |
 | Fireworks | Serverless deprecated from 2026-09-25; on-demand only (S11). $25 credits (S14) | Not recommended. |
 | Meta Model API | Does **not** serve Glimmer: "Because Muse Glimmer is self-hosted, the API pricing and specs above don't apply" (S5) | Hackathon Meta Model API credits **cannot** pay for Glimmer inference. |
 
-- **Structured output:** Together documents `response_format` (JSON schema / regex) and uses Glimmer in its regex example (S7). We **do not rely on it.** Final answers arrive as `submit_answer` tool-call arguments, and the harness validates those itself. This uses one mechanism (native tool calling) across all providers.
-- **Unverified until the Phase 04 smoke test:**
-  - whether Together accepts `top_k` and `chat_template_kwargs.reasoning_strength`;
-  - which reasoning field it returns;
-  - whether `usage.completion_tokens` includes reasoning tokens;
-  - real latency for our prompt sizes.
-- **Estimated cost:** ~5 agent calls (≈40K input / 7.5K output tokens in total) plus ~3 judge calls ≈ **$0.03 per question**, an estimate, not a measurement. One full evaluation (60 items × 3 runs, B and C sharing runs) ≈ $6. Proposed founder cap for all inference in Phases 04–07: $25 (split per phase in PHASE_PLAN).
+- **Structured output:** Together documents `response_format` (JSON schema / regex) and uses Glimmer in its regex example (S7). We **do not rely on it.** Agent answers arrive as `submit_answer` tool-call arguments, and B0 answers as JSON in the final message. The harness validates both itself.
+- **Unverified until B0 stages B0-2 and B0-3 (§5.8):**
+  - BF16 loading with `AutoModelForCausalLM` on the runtime Colab actually allocates;
+  - peak VRAM;
+  - the exact message headers in generated output;
+  - generation latency at our prompt sizes.
+- **Unverified until the Phase 04 smoke test:** the chosen agent backend's handling of tool calls, `top_k`, `reasoning_strength`, the reasoning field and `usage`.
+- **Cost:**
+  - **B0:** no per-token cost. The founder's Colab subscription and compute-unit use are recorded per run.
+  - **Hosted backend (only if approved):** ~5 agent calls (≈40K input / 7.5K output tokens in total) plus ~3 judge calls ≈ **$0.03 per question**. This is an estimate, not a measurement. The proposed cap for hosted inference across Phases 04–07 is $25.
 
 ## 9. Security model (summary)
 
 - **Least authority:** the model can only read the current session's corpus. There is no write, network, filesystem, or shell tool. The worst-case result of prompt injection is a misleading answer text, and even that must survive M5.
 - **Injection handling:** documents are never placed in the system prompt; passages are delimited; prompts instruct the model to ignore embedded instructions. Injection is measured, not assumed solved: EVALUATION_CONTRACT includes injection items with canary strings.
 - **Secrets:**
-  - `HECTOR_MODEL_API_KEY` comes from the environment or the host's secret store.
-  - `.env` is git-ignored (Phase 02).
-  - The key is never logged, never shown in errors, and never sent to the browser.
-- **User data:** documents live in memory (UI) or a local SQLite file (CLI/eval). They are sent to the inference provider. The provider's data-retention terms are **not verified**: check them before any public demo with real users.
+  - B0 needs no secrets: the checkpoint is not gated (S15), so no Hugging Face token is set. No API key exists for B0.
+  - Notebooks never contain credentials and do not use Colab secrets.
+  - Hosted backends, if approved: `HECTOR_MODEL_API_KEY` comes from the environment or the host's secret store. `.env` is git-ignored. The key is never logged, never shown in errors, and never sent to the browser.
+- **User data:**
+  - Documents live in memory (UI) or a local SQLite file (CLI/eval), and are sent to wherever the model runs.
+  - B0 runs on a Google-managed Colab VM with a synthetic corpus. Colab's generative AI features collect prompts, code and outputs when used (S17), so they are not used on Hector notebooks.
+  - A hosted provider's data-retention terms are **not verified**: check them before any public demo with real users.
 - **Resource exhaustion:** upload limits, question length limit, step/token/time budgets, judge concurrency, UI queue concurrency, per-session rate limit, daily spend cap.
-- **Logging:** traces stay local, contain no keys or reasoning text, and are off in public mode. No third-party analytics.
+- **Logging:** traces and B0 records stay local or in the founder's Drive until reviewed. They contain no keys or reasoning text. Traces are off in public mode. No third-party analytics.
 - **Rendering:** escaped text only, so injected HTML/JS cannot execute and links are not auto-clickable.
 
 ## 10. Error taxonomy
@@ -419,6 +541,7 @@ Single source of truth; implemented as constants in `hector/config.py`.
 | Adapter | `AUTH`, `BAD_REQUEST`, `RATE_LIMITED`, `UNAVAILABLE`, `TIMEOUT`, `MALFORMED_RESPONSE`, `TRUNCATED` | `FAILED` message if unrecoverable |
 | Verifier | `MALFORMED_ID`, `UNKNOWN_CHUNK`, `UNOBSERVED_CHUNK`, `QUOTE_TOO_SHORT`, `QUOTE_NOT_FOUND`, `NO_VALID_CITATION`, `NUMBER_NOT_IN_EVIDENCE`, verdict `ERROR` | claim withheld with reason |
 | Outcome | `NO_DOCUMENTS`, `MODEL_DECLINED`, `ALL_CLAIMS_REJECTED`, `BUDGET_EXHAUSTED`, `PROTOCOL_ERROR`, `PROVIDER_ERROR`, `TIMEOUT`, `SPEND_CAP` | fixed abstention / failure text |
+| B0 run (§5.8) | `PREFLIGHT_FAILED:<check>`, `LOAD_OOM`, `LOAD_PLACEMENT`, `LOAD_DTYPE`, `INTERRUPTED` (run); `OOM`, `TRUNCATED`, `TIMEOUT`, `NO_FINAL_MESSAGE`, `INVALID_OUTPUT` (item) | run or item marked failed; never scored as an abstention |
 
 ## 11. Planned repository layout
 
@@ -434,6 +557,11 @@ hector/model.py         # M3   (Phase 04)
 hector/agent.py         # M4   (Phase 04)
 hector/verify.py        # M5+M6 (Phase 05)
 hector/evaluate.py      # harness (Phases 02, 04, 05)
+hector/pilot_b0.py      # B0 dataset, prompt, parsing, scoring, report; stdlib (Phase 01b)
+hector/b0_colab.py      # B0 preflight, loading, generation; torch/transformers, Colab only (Phase 01b)
+notebooks/b0_colab.ipynb  # thin Colab driver (Phase 01b)
+eval/pilot-b0/          # B0 corpus, questions, FREEZE.json (Phase 01b)
+docs/eval/pilot-b0/     # reviewed B0 run artifacts (Phase 01b)
 app.py                  # Web UI (Phase 06)
 eval/corpus/*.md        # evaluation documents (Phase 03)
 eval/questions.jsonl    # labeled items (Phase 03)
@@ -452,16 +580,18 @@ Tests use stdlib `unittest` (`python -m unittest discover -s tests`). There are 
 | Support check | deterministic layers + isolated same-model judge | Quote match only: proves existence, not support. Second provider (e.g. Muse Spark via Meta Model API credits) as judge: possible later ablation; adds an integration |
 | Verifier feedback | none (single pass) | Revise loop: more calls, blurs the B/C comparison, unbounded behaviour |
 | Loop | single agent, ≤6 calls, 3 tools | Agent frameworks / multi-agent: more surface, less inspectable, not needed |
-| Provider | Together serverless | Dedicated GPU: hourly cost, cold starts, ops work during a short build window |
-| Transport | stdlib `urllib`, non-streaming | OpenAI SDK: unnecessary dependency for one POST; streaming deferred (shortcut in §5.3) |
+| B0 runtime | Colab GPU, BF16, in-process Transformers | Together serverless: FP8 rather than BF16, per-token billing, an external account; kept only as an approved fallback. A vLLM server for B0: a network service the pilot does not need |
+| Agent backend | decided in Phase 04 (§5.3) | Fixing it now: the tool-calling path on Colab is not yet verified |
+| Transport (HTTP backends) | stdlib `urllib`, non-streaming | OpenAI SDK: unnecessary dependency for one POST; streaming deferred (shortcut in §5.3) |
 | UI | Gradio (Phase 06) | Custom web stack: more code. Stdlib `http.server`: Python docs advise against production use |
 | Storage | per-session SQLite (`:memory:` in UI) | Shared DB: cross-user data leak risk |
 
 Open questions (resolved in later phases, not blocking Phase 02):
 
-1. Together behaviour for `top_k`, `reasoning_strength`, the reasoning field, and `usage` (Phase 04 smoke test).
-2. Whether non-streaming requests stay under 120 s at our reasoning lengths (Phase 04).
-3. Whether the judge agrees with humans well enough (EVALUATION_CONTRACT §5 threshold), or needs a stronger or different judge model (Phase 05).
+1. Whether `AutoModelForCausalLM` loads the checkpoint in BF16 on the allocated Colab GPU, its peak VRAM, and the exact output message headers (B0 stages B0-2 and B0-3).
+2. The agent backend, and its behaviour for tool calls, `top_k`, `reasoning_strength`, the reasoning field and `usage` (Phase 04).
+3. Whether generation stays within time limits at our reasoning lengths (B0 and Phase 04).
+4. Whether the judge agrees with humans well enough (EVALUATION_CONTRACT §5 threshold), or needs a stronger or different judge model (Phase 05).
 
 ## 13. Sources (verified 2026-10-27)
 
@@ -469,8 +599,8 @@ Open questions (resolved in later phases, not blocking Phase 02):
 |---|---|---|
 | S1 | https://dev.meta.ai/models/muse-glimmer | model positioning, Apache 2.0, benchmarks (Meta-reported) |
 | S2 | https://dev.meta.ai/docs/muse-glimmer | 30B dense, text+image in / text out, 128K default context, launch partners |
-| S3 | https://dev.meta.ai/docs/muse-glimmer/deploy | runtimes, ~72 GB VRAM BF16, sampling defaults, no greedy, stop tokens, tool parsing, Together model string/prices, 32,768 output cap |
-| S4 | https://dev.meta.ai/docs/muse-glimmer/prompting | chat template, ATEM tool calls, one tool call per turn, `reasoning_strength` |
+| S3 | https://dev.meta.ai/docs/muse-glimmer/deploy | runtimes, ~60 GB BF16 weights and ~72 GB VRAM to serve, BF16 hardware list (incl. RTX PRO 6000 96 GB), Transformers recipe (`AutoModelForCausalLM`, `dtype=torch.bfloat16`, `eos_token_id` = `<|eot|>`, `<|end_of_text|>`), sampling defaults, no greedy, never stop on `<|eom|>`, tool parsing, Together model string/prices, 32,768 output cap |
+| S4 | https://dev.meta.ai/docs/muse-glimmer/prompting | chat template, `to=self` reasoning and `to=user` answer messages, special tokens, ATEM tool calls, one tool call per turn, `reasoning_strength` (default `high`), sampling `top_k 64` |
 | S5 | https://dev.meta.ai/docs/overview | Meta Model API does not serve Glimmer |
 | S6 | https://www.together.ai/models/muse-glimmer | endpoint, pricing, FP8, serverless + dedicated |
 | S7 | https://docs.together.ai/docs/inference/chat/structured-outputs | `response_format` JSON schema / regex (not relied upon) |
@@ -481,6 +611,32 @@ Open questions (resolved in later phases, not blocking Phase 02):
 | S12 | https://openrouter.ai/meta/muse-glimmer-30b | two upstream providers and prices |
 | S13 | https://dev.meta.ai/events/global-hackathon | dates, tracks, themes |
 | S14 | https://cerebralvalley.ai/e/meta-ai-developer-hackathon | dates, partner credits (Baseten, Modal, Fireworks) |
+| S15 | https://dev.meta.ai/docs/muse-glimmer/get-the-model | BF16 safetensors repository contents, ~60 GB, no API key and no gated access, Transformers ≥ 5.15 required (earlier versions lack the native path) |
+| S16 | https://huggingface.co/meta-models/Muse-Glimmer-30B | Apache 2.0, ~29.6B parameters including a ~1.8B perception encoder, `AutoProcessor` + `AutoModelForMultimodalLM` usage example, temperature 1.0 |
+| S17 | https://research.google.com/colaboratory/faq.html | VMs deleted when idle and with a maximum lifetime; up to 12 h (24 h continuous on Pro+ with compute units); resources, GPU types and limits not guaranteed; Drive mounting grants access to the whole Drive; generative AI features collect prompts and outputs |
 | L1 | Local check, founder workstation, 2026-10-27 | Python 3.14.5 / SQLite 3.50.4: FTS5 + Porter available; `verify` matches `verified` |
+| L2 | Founder-run Colab preflight, 2026-10-27 ([PROVENANCE §5a](docs/PROVENANCE.md#5a-colab-preflight-observations-founder-run)) | Transformers 5.20.2 loaded config, tokenizer, chat template and processor (CPU runtime); a separate runtime showed CUDA, an RTX PRO 6000 Blackwell, 94.43 / 94.97 GiB free/total VRAM, 193.17 GiB free disk, PyTorch 2.11.0+cu130. No weights loaded, no generation |
 
-Benchmark figures in S1 are Meta-reported and are not reproduced by this project.
+Benchmark figures in S1 and S16 are Meta-reported and are not reproduced by this project.
+
+## 14. Continuity with historical Hector
+
+This repository is the canonical successor of WEIGHTWRIGHT's private Hector research (PROJECT §1a). It imports nothing ([PROVENANCE §2](docs/PROVENANCE.md#2-historical-private-hector-research)), so the relationship is one of principles, not code.
+
+- **Kept:**
+  - every answer traceable to an exact source span;
+  - deterministic checks before model judgement;
+  - fail-closed handling and explicit abstention;
+  - frozen, hashed evaluation inputs and held-out discipline;
+  - failures reported separately and never counted as abstentions;
+  - Wilson intervals;
+  - network-free tests with fake models.
+- **Not equivalent:**
+  - Historical R0 ranked the blocks of *one* document with an external BM25 library. M2 ranks chunks across the *corpus* with SQLite FTS5 `bm25()`, with a different tokenizer and query form.
+  - R0's measurements therefore say nothing about M2, which must pass G1 on this project's data.
+- **Not transferred:**
+  - R0 acceptance;
+  - the historical R1 (DeBERTa) protocol, whose evaluation never ran;
+  - R1's unfinished Gate 6 (environment lock).
+
+  This project's gates are G0 (B0), G1, H1–H4 and T1–T7 ([EVALUATION_CONTRACT](docs/EVALUATION_CONTRACT.md)).

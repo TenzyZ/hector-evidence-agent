@@ -3,8 +3,13 @@
 Evidence-checked question answering over your own documents, built on Meta's open-weight **Muse Glimmer 30B**.
 By **WEIGHTWRIGHT Research** for the Meta Global AI Developer Hackathon 2026 (Startup track).
 
-> **Status (2026-10-27): Phase 01, architecture and specifications only.**
-> There is no application code yet. Everything below describes the *planned* system. Nothing here has been implemented, run, or evaluated.
+Hector Evidence Agent is WEIGHTWRIGHT's first product and the canonical home of its Hector research. Earlier Hector research lives in a private repository; none of its code, data or reports is included here. See [docs/PROVENANCE.md](docs/PROVENANCE.md).
+
+> **Status (2026-10-27): Phase 01, architecture and specifications.**
+> - **Done:** the architecture and evaluation specifications in this repository.
+> - **Done, outside this repository (founder-run):** a Google Colab preflight that loaded Muse Glimmer's configuration, tokenizer, chat template and processor, and a separate check that a Colab GPU runtime was available. See [PROVENANCE §5a](docs/PROVENANCE.md#5a-colab-preflight-observations-founder-run).
+> - **Planned next (Phase 01b):** the first baseline, **B0**. It runs Muse Glimmer 30B in BF16 on a Google Colab GPU against 16 labeled questions.
+> - **Not done:** no model weights have been loaded and no text has been generated. No evaluation has been run, and there is no application code yet.
 
 ## The idea
 
@@ -23,19 +28,20 @@ Outcomes: `SUPPORTED`, `QUALIFIED`, `ABSTAINED`, `FAILED`. Hector checks support
 ## Planned design (summary)
 
 - **Input:** `.txt` and `.md` files in a private, per-session corpus.
-- **Retrieval:** SQLite FTS5 with bm25 ranking. Python standard library; no vector database.
-- **Agent:** Muse Glimmer 30B via Together AI's OpenAI-compatible API. Three read-only tools, at most 6 model calls, one tool call per turn.
-- **Interfaces:** a CLI for ingest, search, ask, and evaluation; a small web UI for the demo.
+- **Retrieval:** SQLite FTS5 with bm25 ranking, from the Python standard library. No vector database.
+- **Agent:** Muse Glimmer 30B with three read-only tools, at most 6 model calls and one tool call per turn. The serving backend for the agent is chosen in Phase 04.
+- **First baseline (B0):** the BF16 checkpoint runs in-process with Hugging Face Transformers on a single Colab GPU. No hosted API is used.
+- **Interfaces:** a CLI for ingest, search, ask, and evaluation, and a small web UI for the demo.
 
 Full design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## How it will be evaluated
 
-Three configurations on 60 labeled questions about fictional documents:
-
-- **A:** retrieval only.
-- **B:** agent without verification.
-- **C:** full Hector.
+- **First, the B0 pilot.** It measures the model alone on 16 labeled questions about fictional documents: one call per question, the whole corpus in context, no verifier.
+- **Then three configurations** on 60 labeled questions:
+  - **A:** retrieval only.
+  - **B:** agent without verification.
+  - **C:** full Hector.
 
 The questions include unanswerable, contradictory, misleading-quote, prompt-injection, and citation-bait items. Metrics, thresholds and limitations: [docs/EVALUATION_CONTRACT.md](docs/EVALUATION_CONTRACT.md). No results exist yet.
 
@@ -44,16 +50,16 @@ The questions include unanswerable, contradictory, misleading-quote, prompt-inje
 | File | Contents |
 |---|---|
 | [PROJECT.md](PROJECT.md) | thesis, users, MVP scope, exclusions, constraints, open decisions |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | components, data flow, trust boundaries, serving decision, sources |
-| [docs/EVALUATION_CONTRACT.md](docs/EVALUATION_CONTRACT.md) | baselines, dataset, metrics, pass criteria |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | components, data flow, trust boundaries, B0 Colab execution, serving decision, sources |
+| [docs/EVALUATION_CONTRACT.md](docs/EVALUATION_CONTRACT.md) | B0 pilot, baselines, dataset, metrics, pass criteria |
 | [docs/PHASE_PLAN.md](docs/PHASE_PLAN.md) | deadline-aware build phases and acceptance gates |
 | [docs/PROVENANCE.md](docs/PROVENANCE.md) | what this repository contains, prior private research, eligibility questions |
 | [AGENTS.md](AGENTS.md) | rules for coding agents working here |
 
 ## Roadmap
 
-Phase 01 specifications (now) → 02 ingestion and retrieval → 03 evaluation dataset → 04 agent loop → 05 verifier → 06 web UI → 07 final evaluation and report. Submission is due 2026-11-04. See [docs/PHASE_PLAN.md](docs/PHASE_PLAN.md).
+Phase 01 specifications (now) → 01b B0 Colab baseline → 02 ingestion and retrieval → 03 evaluation dataset → 04 agent loop → 05 verifier → 06 web UI → 07 final evaluation and report. Submission is due 2026-11-04. See [docs/PHASE_PLAN.md](docs/PHASE_PLAN.md).
 
 ## License and provenance
 
-No license has been chosen yet, so default copyright applies until a `LICENSE` file is added. All content is new to this repository; see [docs/PROVENANCE.md](docs/PROVENANCE.md). Muse Glimmer is released by Meta under Apache 2.0.
+No license has been chosen yet, so default copyright applies until a `LICENSE` file is added. Every file in this repository was written for it, starting 2026-10-27. Earlier private Hector research informed the direction, but none of its source, data or reports is included; see [docs/PROVENANCE.md](docs/PROVENANCE.md). Muse Glimmer is released by Meta under Apache 2.0.

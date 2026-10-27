@@ -5,26 +5,28 @@ Workflow: **one phase → one branch → one pull request.** Each phase starts o
 
 | Role | Responsibility |
 |---|---|
-| Claude (via Devin) | architecture, specifications, evaluation data, report writing |
+| Claude (planning sessions) | architecture, specifications, evaluation data, report writing |
 | Codex Sol | implementation phases |
-| Claude Opus | independent review of each implementation PR |
-| Founder | scope authorization, paid-usage authorization, human labels, acceptance, all Git delivery (commit/push/PR/merge unless delegated in writing for a phase) |
+| Claude Opus, in a separate session | independent review of each PR. An author's self-review is never reported as independent |
+| Founder | scope authorization, paid-usage and GPU authorization, Colab runs, human labels, acceptance, all Git delivery (commit/push/PR/merge unless delegated in writing for a phase) |
 
 ## Schedule
 
 | Phase | Name | Owner | Target date | Depends on | Paid usage |
 |---|---|---|---|---|---|
 | 01 | Architecture and specifications | Claude | Oct 27 | — | none |
+| 01b | B0 pilot: Muse Glimmer 30B BF16 on Google Colab, gate G0 | Codex Sol (code), founder (Colab runs) | Oct 27–28 | 01 | no API charges; Colab compute units, recorded |
 | 02 | Ingestion, retrieval, CLI, eval harness (config A) | Codex Sol | Oct 28 | 01 | none |
 | 03 | Evaluation dataset + retrieval gate G1 | Claude | Oct 28–29 | 01 (authoring), 02 (running) | none |
-| 04 | Model adapter + agent loop (config B) | Codex Sol | Oct 29–30 | 02, 03 | ≤ $5 |
-| 05 | Evidence verifier + decision policy (config C), dev evaluation | Codex Sol | Oct 31–Nov 1 | 04 | ≤ $8 |
-| 06 | Web UI + demo script | Codex Sol | Nov 1–2 | 05 (contract from 04) | ≤ $2 |
-| 07 | Final evaluation, report, submission package | Claude + founder | Nov 3 | 05, 06 | ≤ $10 |
+| 04 | Model adapter + agent loop (config B) | Codex Sol | Oct 29–30 | 02, 03 | per chosen backend: Colab units, or hosted ≤ $5 |
+| 05 | Evidence verifier + decision policy (config C), dev evaluation | Codex Sol | Oct 31–Nov 1 | 04 | same backend; hosted ≤ $8 |
+| 06 | Web UI + demo script | Codex Sol | Nov 1–2 | 05 (contract from 04) | same backend; hosted ≤ $2 |
+| 07 | Final evaluation, report, submission package | Claude + founder | Nov 3 | 05, 06 | same backend; hosted ≤ $10 |
 | — | Buffer; founder submits | Founder | Nov 4 (before 9 PM ET) | 07 | — |
 
 - **Feature freeze:** end of Nov 2. After the final test-split run (Phase 07), any code change requires re-running it.
-- **Total proposed inference cap:** $25, which matches [PROJECT.md §8](../PROJECT.md#8-constraints).
+- **Phase 01b and Phase 02 can run in parallel after Phase 01**, with coordinated changes to three shared files: `.gitignore`, `hector/__init__.py`, and `hector/config.py`. Whichever phase lands first creates all three; the later phase reuses `hector/__init__.py` and extends `.gitignore` and `hector/config.py`, preserving the first phase's ignore entries and constants.
+- **Hosted inference cap:** $25 in total, and only if a hosted backend is approved. This matches [PROJECT.md §8](../PROJECT.md#8-constraints). Colab compute units are recorded per run.
 
 **Cut order if behind schedule.** Cut top first:
 
@@ -41,8 +43,72 @@ Workflow: **one phase → one branch → one pull request.** Each phase starts o
 
 - **Branch:** `feat/meta-architecture-phase-01`
 - **Files:** `PROJECT.md`, `ARCHITECTURE.md`, `AGENTS.md`, `README.md`, `docs/EVALUATION_CONTRACT.md`, `docs/PHASE_PLAN.md`, `docs/PROVENANCE.md`.
-- **Acceptance:** all seven files exist and are internally consistent; provider/model claims carry sources (ARCHITECTURE §13); no code; no secrets; no private material.
-- **Founder gate:** approve the architecture and answer the three decisions in [PROJECT.md §9](../PROJECT.md#9-open-founder-decisions).
+- **PR:** #1, a single PR. Revision 2 made Colab BF16 the primary B0 path; Together AI became a fallback that needs separate approval. Revision 3 repairs the documented review findings.
+- **Acceptance:** all seven files exist and are internally consistent; model, runtime and provider claims carry sources (ARCHITECTURE §13); no code; no secrets; no private material.
+- **Founder gate:**
+  - An independent Opus review of the published PR head, separate from the author's self-review.
+  - Approve the architecture and answer the three decisions in [PROJECT.md §9](../PROJECT.md#9-open-founder-decisions).
+
+## Phase 01b — B0 pilot on Google Colab
+
+- **Branch:** `feat/b0-colab-pilot-phase-01b`, created from `main` after Phase 01 merges. Not created yet.
+- **Objective:** the stdlib B0 harness, a Colab-only loading and generation module, and a thin notebook. Then the staged B0 run (B0-0 to B0-4) by the founder, producing gate G0's evidence.
+- **Specification:** ARCHITECTURE §5.8, §7 (B0 rows), §10 (B0 row); EVALUATION_CONTRACT §2a and Appendix A.
+
+**Authorized files** (create; if Phase 02 created the three shared files listed above, reuse `hector/__init__.py` and extend `.gitignore` and `hector/config.py` without discarding Phase 02 content):
+
+```text
+.gitignore                 # .env, .env.*, __pycache__/, *.db, eval/results/
+hector/__init__.py
+hector/config.py           # B0 constants from ARCHITECTURE §7 only
+hector/pilot_b0.py         # stdlib: validate/freeze, prompt, parse (to=self / to=user split), score, summary, review.csv; CLI
+hector/b0_colab.py         # Colab only: preflight P, load, generate, item records (imports torch/transformers inside functions)
+notebooks/b0_colab.ipynb   # thin driver: commit check; one install cell pinning transformers (≥ 5.15) and accelerate to exact releases ≥ 7 days old; Drive mount; calls into hector/
+tests/test_pilot_b0.py     # stdlib: dataset, parser, scoring, Wilson, byte-identical re-score; stub model/tokenizer for preflight decisions, placement/dtype asserts, OOM path, no reasoning text written
+eval/pilot-b0/corpus/*.md  # Appendix A, byte-exact
+eval/pilot-b0/questions.jsonl
+eval/pilot-b0/FREEZE.json
+docs/eval/pilot-b0/        # after the run: the reviewed run directory and REPORT.md
+```
+
+**Founder prerequisites:**
+- Accept the Appendix A labels.
+- Authorize Colab GPU use and the ~60 GB checkpoint download into the Colab VM.
+- Have a Colab runtime with a GPU that passes preflight P.
+
+No API key or Hugging Face token is needed.
+
+**Execution** (founder, in Colab, in order; stop at the first failure):
+1. B0-0 environment;
+2. B0-1 tokenizer;
+3. resource preflight P;
+4. weight download;
+5. B0-2 load smoke;
+6. B0-3 generation smoke on q01;
+7. B0-4 full run of 16 items;
+8. offline `score` on the laptop;
+9. copy the reviewed run into `docs/eval/pilot-b0/`.
+
+**Acceptance:**
+1. `python -m unittest discover -s tests -v` passes on a laptop without torch, transformers or a GPU.
+2. `validate` passes on the Appendix A files, and `FREEZE.json` matches them.
+3. Tests prove:
+   - no reasoning text is ever written;
+   - `FAILED` and `INVALID_OUTPUT` never count as abstentions;
+   - a failing preflight downloads nothing;
+   - a non-GPU placement or non-BF16 parameter fails the load.
+4. The run's `stages.json` holds B0-0, B0-1, P, B0-2 and B0-3 from the same runtime session as its B0-4 run; evidence is never mixed across runs.
+5. `score` reproduces `summary.json` byte for byte.
+6. `REPORT.md` takes every number from `summary.json` and states the §2a limitations. It labels the run as a complete baseline or runtime-limited.
+7. The diff touches only authorized files and contains no credentials or reasoning text.
+
+**Stop and ask:**
+- preflight P fails;
+- BF16 loading fails or does not fit;
+- `AutoModelForCausalLM` cannot load the checkpoint;
+- a fallback (quantized or hosted) seems necessary. A fallback is a separate proposal and is never reported as B0.
+
+**Founder gate:** an independent Opus review of the published PR. The founder then reads `REPORT.md` against `summary.json` and fills in or spot-checks `review.csv`.
 
 ## Phase 02 — Ingestion, retrieval, CLI, eval harness (config A)
 
@@ -50,7 +116,7 @@ Workflow: **one phase → one branch → one pull request.** Each phase starts o
 - **Objective:** a stdlib-only Python package that ingests `.txt`/`.md`, stores chunks with exact offsets in SQLite FTS5, searches safely, and scores retrieval-only baseline A on a labeled dataset.
 - **Specification:** ARCHITECTURE §5.1, §5.2, §5.7 (`ingest`, `search`, `eval` subcommands), §7, §11; EVALUATION_CONTRACT §3.1 (item schema), §4 (R1, R2, O1 for A), §6.
 
-**Authorized files (create only):**
+**Authorized files** (create; if Phase 01b created the three shared files, reuse `hector/__init__.py` and extend `.gitignore` and `hector/config.py` without discarding Phase 01b content):
 
 ```text
 pyproject.toml            # name "hector", requires-python ">=3.12", dependencies = []
@@ -123,20 +189,20 @@ python -m hector eval run --config A --corpus tests/fixtures/corpus --questions 
 - **Objective:** M3 and M4 as specified; `ask --no-verify`; `eval run --config BC` producing B results (C fields empty until Phase 05).
 - **Specification:** ARCHITECTURE §5.3, §5.4, §6, §7, §8.
 - **Authorized files:**
-  - create `hector/model.py`, `hector/agent.py`, `tests/test_model.py` (local fake HTTP server) and `tests/test_agent.py` (scripted fake model);
+  - create `hector/model.py`, `hector/agent.py`, `tests/test_model.py` (local fake HTTP server for HTTP mode; stubbed generation for in-process mode) and `tests/test_agent.py` (scripted fake model);
   - edit `hector/__main__.py`, `hector/config.py`, `hector/evaluate.py`, `tests/test_cli.py`.
 - **Founder prerequisites:**
-  - a Together AI account;
-  - `HECTOR_MODEL_API_KEY` set locally (never committed);
-  - authorization of ≤ $5 for this phase.
-- **Smoke test (paid, ≤ 10 calls):** one plain request and one tool-calling round trip against Together. Record in the PR:
+  - choose the agent backend (ARCHITECTURE §5.3: an OpenAI-compatible server on the Colab GPU, in-process Transformers, or an approved hosted fallback), informed by B0's results;
+  - for a hosted backend, also: an account, `HECTOR_MODEL_API_KEY` set locally (never committed), and authorization of ≤ $5 for this phase;
+  - for Colab, also: authorization of GPU use.
+- **Smoke test (≤ 10 calls):** one plain request and one tool-calling round trip against the chosen backend. Record in the PR:
   - `top_k` acceptance;
   - the reasoning field name;
   - whether `usage` is present and includes reasoning tokens;
   - `chat_template_kwargs.reasoning_strength` acceptance;
   - observed latency.
 - **Acceptance:**
-  1. All adapter error rows (ARCHITECTURE §5.3) are covered by tests against the fake server.
+  1. All applicable adapter errors and protocol expectations in ARCHITECTURE §5.3 are covered: fake-server tests for HTTP mode, stubbed-generation tests for in-process mode, including structured tool-call parsing, schema validation, malformed inputs and retry/stop behavior. Both modes use the same normalized response contract and M4 validation.
   2. The key never appears in logs, exceptions, or traces (test).
   3. All loop branches in §5.4 are covered by scripted-fake tests.
   4. A tool outside the allowlist can never execute (test).
@@ -152,7 +218,7 @@ python -m hector eval run --config A --corpus tests/fixtures/corpus --questions 
 - **Authorized files:**
   - create `hector/verify.py`, `tests/test_verify.py`, `tests/test_verify_forgery.py`;
   - edit `hector/agent.py` (integration only), `hector/evaluate.py`, `hector/__main__.py`, `hector/config.py`.
-- **Paid:** ≤ $8 (dev runs).
+- **Paid:** ≤ $8 for dev runs only if the optional hosted backend is approved (schedule above); this is a spending cap, not an actual-cost guarantee or a Colab BF16 limit. Colab compute units are recorded separately; GPU use still requires founder authorization.
 - **Acceptance:**
   - H1 passes.
   - Offset round-trip holds on all genuine forgery-suite cases.
@@ -182,7 +248,7 @@ python -m hector eval run --config A --corpus tests/fixtures/corpus --questions 
 - **Objective:** the frozen test-split run (`--runs 3 --final`), human labels, `docs/EVAL_REPORT.md` (EVALUATION_CONTRACT §7), a README update with actual numbers, and a video outline.
 - **Owners:** founder for labels, video, and submission; Claude for report and README text.
 - **Authorized files:** `docs/EVAL_REPORT.md`, `docs/eval/summary.json` and `docs/eval/claims_labeled.csv` (copied from the git-ignored `eval/results/<final run>/`), `README.md`, `docs/PROVENANCE.md`, `docs/DEMO_SCRIPT.md`, and `LICENSE` if the founder chooses one.
-- **Paid:** ≤ $10.
+- **Paid:** ≤ $10 only if the optional hosted backend is approved (schedule above); this is a spending cap, not an actual-cost guarantee or a Colab BF16 limit. Colab compute units are recorded separately; GPU use still requires founder authorization.
 - **Acceptance:**
   - Every number in the README and report traces to `summary.json` or the label CSV.
   - The limitations section is present.

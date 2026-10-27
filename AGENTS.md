@@ -2,6 +2,8 @@
 
 Instructions for coding agents working in this repository. Keep this file short; details live in the linked documents.
 
+This is the canonical Hector repository. The private `TenzyZ/Hector` repository is a read-only research reference: never copy from it, and its results are never evidence here ([PROVENANCE §2](docs/PROVENANCE.md#2-historical-private-hector-research)).
+
 ## Read first, in this order
 
 1. Your phase authorization from the founder: phase number, branch, allowed files, budget.
@@ -22,7 +24,7 @@ Instructions for coding agents working in this repository. Keep this file short;
 - Work only on the branch named for your phase in PHASE_PLAN. Never on `main`.
 - Modify only the files your phase lists. Anything else needs founder approval first.
 - Do not commit, push, open PRs, or merge unless the phase authorization explicitly grants it. The founder owns Git delivery.
-- Run tests with `python -m unittest discover -s tests -v`. Tests make no network calls; the model is always faked in tests.
+- Run tests with `python -m unittest discover -s tests -v`. Tests make no network calls; the model is always faked in tests. No test imports `torch` or `transformers` or needs a GPU: Colab-only code is tested with stubs.
 
 ## Engineering rules
 
@@ -33,7 +35,14 @@ Instructions for coding agents working in this repository. Keep this file short;
 - `AnswerResult` (ARCHITECTURE §6) is the shared contract. Change it only through a spec change.
 - Fail closed. Unknown means rejected or abstained, never displayed as verified.
 - The model gets read-only tools over the session's own corpus. Never add shell, filesystem, network, or code-execution tools.
-- Never log, print, or return the API key. Never persist model reasoning text.
+- Never log, print, or return any credential. Never persist model reasoning text (Glimmer's `to=self` messages); keep only its token count.
+
+## Model execution on Google Colab
+
+- Codex writes Colab evaluation code (the B0 harness and notebook) only in the phase that lists it (Phase 01b). Codex never runs the notebook, downloads weights, or uses Colab GPU time.
+- The founder runs the Colab stages. The notebook checks out an exact commit of this public repository and never uses the private historical repository.
+- Notebooks hold no credentials and no evaluation logic. Logic lives in `hector/`, where tests cover it.
+- B0 runs in BF16. Never substitute a quantized checkpoint or a hosted model and report the result as B0.
 
 ## Tools
 
@@ -43,7 +52,7 @@ Instructions for coding agents working in this repository. Keep this file short;
 
 ## Stop and ask the founder before
 
-- Any paid API call outside your phase's authorized budget. State the estimate.
+- Any paid API call or Colab GPU use outside your phase's authorization. State the estimate.
 - Downloading model weights, provisioning GPUs or endpoints, deploying publicly.
 - Adding a dependency, or touching CI, deployment configuration, or files outside your phase list.
 - Any reuse of private Hector material ([PROVENANCE §4](docs/PROVENANCE.md#4-reuse-policy)).
