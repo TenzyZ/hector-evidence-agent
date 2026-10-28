@@ -1,0 +1,3 @@
+/eval/corpus/** text eol=lf
+/eval/questions.jsonl text eol=lf
+/tests/fixtures/** text eol=lf

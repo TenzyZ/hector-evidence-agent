@@ -1,0 +1,6 @@
+[project]
+name = "hector"
+version = "0.2.0"
+description = "Document ingestion and lexical retrieval with exact source offsets"
+requires-python = ">=3.12"
+dependencies = []
