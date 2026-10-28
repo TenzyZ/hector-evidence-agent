@@ -89,6 +89,8 @@ No API key or Hugging Face token is needed.
 8. offline `score` on the laptop;
 9. copy the reviewed run into `docs/eval/pilot-b0/`.
 
+**Native-loader hotfix (founder-authorized 2026-10-28):** branch `fix/b0-muse-glimmer-native-loader`; only `hector/b0_colab.py`, `tests/test_pilot_b0.py`, `ARCHITECTURE.md`, this file, and Markdown cells in `notebooks/b0_colab.ipynb`. Use the registered `AutoModelForMultimodalLM` path and record the actual resolved class; preserve tokenizer, benchmark, BF16, placement, scoring and existing acceptance criteria. Local implementation and offline tests only; no Git delivery or Colab execution is authorized. A future separately authorized Colab run covers the existing continuous B0-2 → B0-3 → B0-4 sequence: full evaluation starts automatically after successful smoke, with no additional B0-4 approval checkpoint.
+
 **Acceptance:**
 1. `python -m unittest discover -s tests -v` passes on a laptop without torch, transformers or a GPU.
 2. `validate` passes on the Appendix A files, and `FREEZE.json` matches them.
@@ -105,7 +107,7 @@ No API key or Hugging Face token is needed.
 **Stop and ask:**
 - preflight P fails;
 - BF16 loading fails or does not fit;
-- `AutoModelForCausalLM` cannot load the checkpoint;
+- the native `AutoModelForMultimodalLM` path cannot load the checkpoint;
 - a fallback (quantized or hosted) seems necessary. A fallback is a separate proposal and is never reported as B0.
 
 **Founder gate:** an independent Opus review of the published PR. The founder then reads `REPORT.md` against `summary.json` and fills in or spot-checks `review.csv`.

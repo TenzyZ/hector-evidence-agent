@@ -124,8 +124,13 @@ class Model:
         self.tokenizer = tokenizer
         self.responses = []
         self.calls = []
-        self.parameters = [("language_model.weight", Parameter()), ("vision_tower.weight", Parameter(count=2))]
-        self.config = SimpleNamespace(_attn_implementation="stub_attention", text_config=None)
+        self.parameters = [("model.language_model.embed_tokens.weight", Parameter()),
+                           ("model.vision_tower.patch_embedder.patch_embedding.weight", Parameter(count=2)),
+                           ("model.vision_adapter.fc1.weight", Parameter(count=3)),
+                           ("model.vision_projection.weight", Parameter(count=4)),
+                           ("lm_head.weight", Parameter(count=5))]
+        self.config = SimpleNamespace(_attn_implementation="stub_attention",
+                                      text_config=SimpleNamespace(_attn_implementation="stub_text_attention"))
 
     def named_parameters(self):
         return iter(self.parameters)
@@ -160,7 +165,8 @@ def fake_libraries(tokenizer, model):
     transformers = ModuleType("transformers")
     transformers.__version__ = colab.TRANSFORMERS_PIN
     transformers.AutoTokenizer = SimpleNamespace(from_pretrained=Mock(return_value=tokenizer))
-    transformers.AutoModelForCausalLM = SimpleNamespace(from_pretrained=Mock(return_value=model))
+    transformers.AutoModelForMultimodalLM = SimpleNamespace(from_pretrained=Mock(return_value=model))
+    transformers.AutoModelForCausalLM = SimpleNamespace(from_pretrained=Mock(side_effect=AssertionError("NO_FALLBACK")))
     accelerate = ModuleType("accelerate")
     accelerate.__version__ = colab.ACCELERATE_PIN
     hub = ModuleType("huggingface_hub")
@@ -419,6 +425,7 @@ class ColabTests(unittest.TestCase):
         self.model = Model(self.tokenizer)
         self.libs = fake_libraries(self.tokenizer, self.model)
         self.torch, self.transformers, self.hub = (self.libs[n] for n in ("torch", "transformers", "huggingface_hub"))
+        self.addCleanup(self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called)
         patches = [patch.dict(sys.modules, self.libs), patch.dict("os.environ", {"HF_HOME": "/content/hf"}),
                    patch.object(colab, "check_repository", return_value=SHA),
                    patch.object(colab.importlib.metadata, "distributions", return_value=[]),
@@ -479,7 +486,7 @@ class ColabTests(unittest.TestCase):
         with self.assertRaisesRegex(colab.B0Error, "ENVIRONMENT_FAILED"):
             run.environment()
         self.assertEqual(run.run["status"], "aborted")
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
 
     def test_all_prompts_are_hashed_and_tokenized_at_exact_revision(self):
         run = self.runner()
@@ -489,7 +496,7 @@ class ColabTests(unittest.TestCase):
         self.assertTrue(all(p["input_tokens"] > 0 and len(p["rendered_prompt_sha256"]) == 64 for p in evidence["prompts"]))
         self.transformers.AutoTokenizer.from_pretrained.assert_called_once_with(
             colab.MODEL_ID, revision=colab.MODEL_REVISION, token=False, trust_remote_code=False)
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
 
     def test_tokenizer_defaults_to_dictionary_and_explicit_mode_returns_ids(self):
         documents, items = pilot.load_dataset()
@@ -528,7 +535,7 @@ class ColabTests(unittest.TestCase):
             with self.assertRaisesRegex(colab.B0Error, "TOKENIZER_FAILED"):
                 run.tokenizer_stage()
         self.assertEqual(run.run["status"], "aborted")
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
 
     def test_preflight_checks_actual_metadata_ram_and_disk_margin(self):
         evidence = colab.resource_preflight("/content/hf")
@@ -561,7 +568,7 @@ class ColabTests(unittest.TestCase):
                         run.preflight()
                     with self.assertRaises(colab.B0Error):
                         run.load(download_authorized=True)
-                    self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+                    self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
                     self.assertEqual(run.run["status"], "aborted")
                     self.assert_private_absent(run)
 
@@ -588,7 +595,7 @@ class ColabTests(unittest.TestCase):
         self.torch.cuda.mem_get_info.side_effect = RuntimeError(PRIVATE)
         with self.assertRaisesRegex(colab.B0Error, "PREFLIGHT_FAILED:measurement"):
             run.preflight()
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
         self.assert_private_absent(run)
 
     def test_load_requires_authorization_and_rechecks_resources(self):
@@ -598,7 +605,7 @@ class ColabTests(unittest.TestCase):
         run.preflight()
         with self.assertRaisesRegex(colab.B0Error, "AUTHORIZATION"):
             run.load(download_authorized=True)
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
         run = self.runner()
         run.environment()
         run.tokenizer_stage()
@@ -608,48 +615,73 @@ class ColabTests(unittest.TestCase):
         self.torch.cuda.mem_get_info.return_value = (1, 2)
         with self.assertRaisesRegex(colab.B0Error, "PREFLIGHT_FAILED:vram"):
             run.load(download_authorized=True)
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_not_called()
 
     def test_load_assertions_and_observed_metrics(self):
         run = self.prepared()
-        self.transformers.AutoModelForCausalLM.from_pretrained.assert_called_once_with(
+        self.transformers.AutoModelForMultimodalLM.from_pretrained.assert_called_once_with(
             colab.MODEL_ID, revision=colab.MODEL_REVISION, dtype="bfloat16", device_map={"": 0},
             token=False, trust_remote_code=False)
         evidence = run.stages["load"]["evidence"]
-        self.assertEqual(evidence["parameter_count"], 12)
+        self.assertEqual(evidence["model_class"], type(self.model).__name__)
+        self.assertEqual(evidence["parameter_count"], 24)
+        self.assertTrue(evidence["vision_encoder_loaded"])
+        self.assertEqual(evidence["vision_parameter_count"], 2)
         self.assertEqual(evidence["vision_parameter_vram_bytes"], 4)
         self.assertEqual(evidence["attention_implementation"], "stub_attention")
+        self.assertEqual(evidence["text_attention_implementation"], "stub_text_attention")
         self.assertEqual(evidence["peak_allocated_bytes"], 1234)
-        for parameter, code in [(Parameter(device="cpu"), "LOAD_PLACEMENT"),
-                                (Parameter(device="cuda:1"), "LOAD_PLACEMENT"),
-                                (Parameter(dtype="float32"), "LOAD_DTYPE")]:
-            self.model.parameters = [("weight", parameter)]
-            with self.assertRaisesRegex(colab.B0Error, code):
-                colab.assert_model(self.model, self.torch)
+        for name, _ in self.model.parameters:
+            for parameter, code in [(Parameter(device="cpu"), "LOAD_PLACEMENT"),
+                                    (Parameter(device="cuda:1"), "LOAD_PLACEMENT"),
+                                    (Parameter(dtype="float32"), "LOAD_DTYPE")]:
+                with self.subTest(name=name, code=code):
+                    self.model.parameters = [(name, parameter)]
+                    with self.assertRaisesRegex(colab.B0Error, code):
+                        colab.assert_model(self.model, self.torch)
         self.model.parameters = [("indices", Parameter(dtype="int64", floating=False))]
         self.assertEqual(colab.assert_model(self.model, self.torch)["parameter_count"], 10)
 
     def test_load_oom_and_class_incompatibility_do_not_fallback(self):
-        for error, code in [(FakeOOM(PRIVATE), "LOAD_OOM"), (RuntimeError(PRIVATE), "LOAD_INCOMPATIBLE")]:
+        for error, code in [(FakeOOM(PRIVATE), "LOAD_OOM"), (ValueError(PRIVATE), "LOAD_INCOMPATIBLE"),
+                            (RuntimeError(PRIVATE), "LOAD_INCOMPATIBLE")]:
             run = self.runner()
             run.environment()
             run.tokenizer_stage()
             run.preflight()
-            self.transformers.AutoModelForCausalLM.from_pretrained.side_effect = error
+            self.transformers.AutoModelForMultimodalLM.from_pretrained.side_effect = error
+            calls_before = self.transformers.AutoModelForMultimodalLM.from_pretrained.call_count
             with self.assertRaisesRegex(colab.B0Error, code):
                 run.load(download_authorized=True)
+            self.assertEqual(self.transformers.AutoModelForMultimodalLM.from_pretrained.call_count, calls_before + 1)
             self.assertEqual(run.run["status"], "aborted")
+            self.assertEqual(run.stages["load"]["evidence"], {"failure": code})
             self.assert_private_absent(run)
-        self.assertEqual(self.transformers.AutoModelForCausalLM.from_pretrained.call_count, 2)
+
+    def test_model_factory_import_failure_is_sanitized_and_aborts(self):
+        run = self.runner()
+        run.environment()
+        run.tokenizer_stage()
+        run.preflight()
+        del self.transformers.AutoModelForMultimodalLM
+        with self.assertRaisesRegex(colab.B0Error, "LOAD_INCOMPATIBLE"):
+            run.load(download_authorized=True)
+        self.assertEqual(run.run["status"], "aborted")
+        self.assertEqual(run.stages["load"]["evidence"], {"failure": "LOAD_INCOMPATIBLE"})
+        for root in (run.path, run.drive):
+            evidence = pilot.read_json(root / "stages.json")
+            self.assertEqual(evidence["stages"]["load"]["evidence"], {"failure": "LOAD_INCOMPATIBLE"})
+        self.assert_private_absent(run)
 
     def test_bad_placement_or_dtype_aborts_loading_stage(self):
         for parameter, code in [(Parameter(device="cpu"), "LOAD_PLACEMENT"),
-                                (Parameter(dtype="float32"), "LOAD_DTYPE")]:
+                                (Parameter(dtype="float32"), "LOAD_DTYPE"),
+                                (None, "LOAD_EMPTY_MODEL")]:
             run = self.runner()
             run.environment()
             run.tokenizer_stage()
             run.preflight()
-            self.model.parameters = [("weight", parameter)]
+            self.model.parameters = [("model.vision_tower.weight", parameter)] if parameter else []
             with self.assertRaisesRegex(colab.B0Error, code):
                 run.load(download_authorized=True)
             self.assertEqual(run.stages["load"]["status"], "failed")
@@ -684,7 +716,11 @@ class ColabTests(unittest.TestCase):
         self.assertEqual(summary["metrics"]["contradiction_disclosure"]["numerator"], 2)
         self.assertEqual(summary["metrics"]["citation_validity"]["numerator"], 17)
         self.assertEqual(summary["compute_units_consumed"], 2)
-        self.assertEqual(summary["load_metrics"]["parameter_count"], 12)
+        self.assertEqual(summary["load_metrics"]["parameter_count"], 24)
+        self.assertEqual(summary["load_metrics"]["model_class"], type(self.model).__name__)
+        self.assertEqual(pilot.read_json(run.path / "summary.json")["load_metrics"], summary["load_metrics"])
+        self.assertIn(f'"model_class": "{type(self.model).__name__}"',
+                      (run.path / "REPORT.md").read_text(encoding="utf-8"))
         for name in colab.ARTIFACTS:
             self.assertEqual((run.path / name).read_bytes(), (run.drive / name).read_bytes())
         before = (run.path / "summary.json").read_bytes()
@@ -828,6 +864,17 @@ class ColabTests(unittest.TestCase):
                  for name in colab.ARTIFACTS}
         self.assertEqual(after, before)
 
+    def test_historical_load_evidence_without_model_class_rescores(self):
+        run = self.prepared()
+        del run.stages["load"]["evidence"]["model_class"]
+        run._persist()
+        self.model.responses = self.ideal_responses(run)
+        summary = run.evaluate()
+        self.assertNotIn("model_class", summary["load_metrics"])
+        before = {name: (run.path / name).read_bytes() for name in colab.ARTIFACTS}
+        pilot.score_run(run.path)
+        self.assertEqual({name: (run.path / name).read_bytes() for name in colab.ARTIFACTS}, before)
+
     def test_changed_scoring_rule_exits_nonzero_without_mutation(self):
         run = self.prepared()
         self.model.responses = self.ideal_responses(run)
@@ -951,7 +998,7 @@ class ColabTests(unittest.TestCase):
                 run = self.prepared()
                 self.model.responses = self.ideal_responses(run)
                 generations_before = len(self.model.calls)
-                loads_before = self.transformers.AutoModelForCausalLM.from_pretrained.call_count
+                loads_before = self.transformers.AutoModelForMultimodalLM.from_pretrained.call_count
                 answers = iter(entries)
                 persisted_records = []
 
@@ -975,7 +1022,7 @@ class ColabTests(unittest.TestCase):
                 self.assertEqual(read.call_count, len(entries))
                 self.assertEqual(output.getvalue().count("finite, non-negative number"), len(entries) - 1)
                 self.assertEqual(len(self.model.calls), generations_before + 16)
-                self.assertEqual(self.transformers.AutoModelForCausalLM.from_pretrained.call_count, loads_before)
+                self.assertEqual(self.transformers.AutoModelForMultimodalLM.from_pretrained.call_count, loads_before)
                 self.assertEqual((run.path / "items.jsonl").read_bytes(), persisted_records[0])
                 records = pilot.jsonl_records(persisted_records[0].decode("utf-8"))
                 self.assertEqual([r["id"] for r in records], [item["id"] for item in run.items])
@@ -1001,13 +1048,13 @@ class ColabTests(unittest.TestCase):
                 run = self.prepared()
                 self.model.responses = self.ideal_responses(run)
                 generations_before = len(self.model.calls)
-                loads_before = self.transformers.AutoModelForCausalLM.from_pretrained.call_count
+                loads_before = self.transformers.AutoModelForMultimodalLM.from_pretrained.call_count
                 with patch("builtins.input", side_effect=["91,37", terminal]) as read, redirect_stdout(io.StringIO()):
                     with self.assertRaises(colab.B0Error if isinstance(terminal, EOFError) else KeyboardInterrupt):
                         run.evaluate(compute_units_after=colab.prompt_compute_units_after)
                 self.assertEqual(read.call_count, 2)
                 self.assertEqual(len(self.model.calls), generations_before + 16)
-                self.assertEqual(self.transformers.AutoModelForCausalLM.from_pretrained.call_count, loads_before)
+                self.assertEqual(self.transformers.AutoModelForMultimodalLM.from_pretrained.call_count, loads_before)
                 self.assertEqual(len(run.records), 16)
                 for directory in (run.path, run.drive):
                     metadata = pilot.read_json(directory / "run.json")

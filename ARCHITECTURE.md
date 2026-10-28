@@ -340,7 +340,7 @@ Answer outcome (config C):
 - **Purpose:** measure Muse Glimmer 30B alone on the fixed B0 dataset ([EVALUATION_CONTRACT §2a](docs/EVALUATION_CONTRACT.md#2a-b0-pilot-muse-glimmer-alone-phase-01b)).
   - Pretrained BF16 weights, evaluation only, no fine-tuning.
   - Produces every artifact needed to re-score the run without the GPU.
-  - Implemented in Phase 01b. Nothing here has run yet.
+  - Implemented in Phase 01b. The founder reports that run `b0-20261028T093956Z-af8945` aborted at B0-2 with `LOAD_INCOMPATIBLE` on 2026-10-28; B0-3 and B0-4 did not execute. The original exception text was not recovered. Successful GPU loading and generation remain unverified.
 - **Flow:**
 
   ```text
@@ -394,16 +394,16 @@ Answer outcome (config C):
   - **On failure:** any failed check ends the run as `PREFLIGHT_FAILED:<check>` with no download and no fallback.
   - **Stale observations:** an earlier session's numbers (L2) never satisfy P.
 - **Model loading:**
-  - Calls: `AutoTokenizer.from_pretrained(MODEL_ID, revision=SHA)` and `AutoModelForCausalLM.from_pretrained(MODEL_ID, revision=SHA, dtype=torch.bfloat16, device_map={"": 0})`. This is Meta's Transformers recipe (S3), pinned to one GPU so nothing can be offloaded silently to CPU or disk.
+  - Calls: `AutoTokenizer.from_pretrained(MODEL_ID, revision=SHA)` and `AutoModelForMultimodalLM.from_pretrained(MODEL_ID, revision=SHA, dtype=torch.bfloat16, device_map={"": 0})`, with `token=False` and `trust_remote_code=False`. Placement is pinned to one GPU so nothing can be offloaded silently to CPU or disk.
   - **Assertions after loading:** every parameter is on `cuda:0`, else `LOAD_PLACEMENT`; every floating-point parameter is `bfloat16`, else `LOAD_DTYPE`.
-  - **Recorded:** parameter count, the attention implementation Transformers selected (default backend; flash-attention is not installed), load time, and peak allocated and reserved VRAM.
+  - **Recorded:** the actual resolved class (`model_class = type(model).__name__`), total parameter count, the attention implementations Transformers selected for the model and text config (default backend; flash-attention is not installed), load time, and peak allocated and reserved VRAM. Existing summary/report generation carries the load evidence through unchanged; historical evidence without `model_class` remains valid.
   - **Cache:** `HF_HOME=/content/hf` on the VM's local disk (about 60 GB, S15). It is deleted with the VM and is never Google Drive or the repository.
   - **Out of memory while loading:** `LOAD_OOM` and the run is blocked. Do not change precision or loading method to make it fit.
-  - **Open item, confirmed in stage B0-2:**
-    - The Hugging Face model card loads the same checkpoint with `AutoProcessor` + `AutoModelForMultimodalLM` (S16).
-    - Meta's Transformers page uses `AutoModelForCausalLM` (S3). B0 is text-only and uses the latter.
-    - B0-2 records whether the ~1.8B-parameter vision encoder (S16) is loaded, and its VRAM cost.
-    - If `AutoModelForCausalLM` cannot load the checkpoint, Phase 01b stops and asks. A class change is recorded, never silent.
+  - **Native class compatibility, verified 2026-10-28 (S18):**
+    - Transformers 5.15.0 and the pinned 5.20.2 register `MuseGlimmerConfig` with `AutoModelForMultimodalLM`, resolving to `MuseGlimmerForConditionalGeneration`. Neither version registers this config with `AutoModelForCausalLM`; Meta's deployment example (S3) is unsupported by those native mappings. This resolves the loader-class question, not runtime acceptance.
+    - The model card's `AutoProcessor` example handles multimodal input (S16). B0 retains `AutoTokenizer`: the native class accepts text-only token IDs and attention masks without processor-produced vision inputs. Prompt rendering, hashes, generation and parsing are unchanged.
+    - The native class constructs the vision tower even for text-only use. B0-2's vision-specific counts and `vision_parameter_vram_bytes` sum only `vision_tower` parameters and their storage bytes, not the whole vision pipeline or measured peak VRAM. Adapter/projection parameters remain included in the total parameter count and placement/BF16 assertions.
+    - A failed native load stops the run without fallback. A class change is recorded in successful load-stage evidence, never silent.
 - **Generation:**
   - One call per item, in file order, batch size 1.
   - Prompt: `tok.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)`. The template's default reasoning strength is `high`; the hash of the rendered prompt is recorded.
@@ -506,7 +506,7 @@ Single source of truth; implemented as constants in `hector/config.py`.
 
 - **Structured output:** Together documents `response_format` (JSON schema / regex) and uses Glimmer in its regex example (S7). We **do not rely on it.** Agent answers arrive as `submit_answer` tool-call arguments, and B0 answers as JSON in the final message. The harness validates both itself.
 - **Unverified until B0 stages B0-2 and B0-3 (§5.8):**
-  - BF16 loading with `AutoModelForCausalLM` on the runtime Colab actually allocates;
+  - BF16 loading with the registered `AutoModelForMultimodalLM` path on the runtime Colab actually allocates;
   - peak VRAM;
   - the exact message headers in generated output;
   - generation latency at our prompt sizes.
@@ -541,7 +541,7 @@ Single source of truth; implemented as constants in `hector/config.py`.
 | Adapter | `AUTH`, `BAD_REQUEST`, `RATE_LIMITED`, `UNAVAILABLE`, `TIMEOUT`, `MALFORMED_RESPONSE`, `TRUNCATED` | `FAILED` message if unrecoverable |
 | Verifier | `MALFORMED_ID`, `UNKNOWN_CHUNK`, `UNOBSERVED_CHUNK`, `QUOTE_TOO_SHORT`, `QUOTE_NOT_FOUND`, `NO_VALID_CITATION`, `NUMBER_NOT_IN_EVIDENCE`, verdict `ERROR` | claim withheld with reason |
 | Outcome | `NO_DOCUMENTS`, `MODEL_DECLINED`, `ALL_CLAIMS_REJECTED`, `BUDGET_EXHAUSTED`, `PROTOCOL_ERROR`, `PROVIDER_ERROR`, `TIMEOUT`, `SPEND_CAP` | fixed abstention / failure text |
-| B0 run (§5.8) | `PREFLIGHT_FAILED:<check>`, `LOAD_OOM`, `LOAD_PLACEMENT`, `LOAD_DTYPE`, `INTERRUPTED` (run); `OOM`, `TRUNCATED`, `TIMEOUT`, `NO_FINAL_MESSAGE`, `INVALID_OUTPUT` (item) | run or item marked failed; never scored as an abstention |
+| B0 run (§5.8) | `PREFLIGHT_FAILED:<check>`, `LOAD_OOM`, `LOAD_PLACEMENT`, `LOAD_DTYPE`, `LOAD_INCOMPATIBLE`, `LOAD_EMPTY_MODEL`, `INTERRUPTED` (run); `OOM`, `TRUNCATED`, `TIMEOUT`, `NO_FINAL_MESSAGE`, `INVALID_OUTPUT` (item) | run or item marked failed; never scored as an abstention |
 
 ## 11. Planned repository layout
 
@@ -588,18 +588,20 @@ Tests use stdlib `unittest` (`python -m unittest discover -s tests`). There are 
 
 Open questions (resolved in later phases, not blocking Phase 02):
 
-1. Whether `AutoModelForCausalLM` loads the checkpoint in BF16 on the allocated Colab GPU, its peak VRAM, and the exact output message headers (B0 stages B0-2 and B0-3).
+1. Whether the registered `AutoModelForMultimodalLM` path loads the checkpoint in BF16 on the allocated Colab GPU, its peak VRAM, and the exact output message headers (B0 stages B0-2 and B0-3). Native class registration is resolved (§5.8); real-runtime acceptance remains pending.
 2. The agent backend, and its behaviour for tool calls, `top_k`, `reasoning_strength`, the reasoning field and `usage` (Phase 04).
 3. Whether generation stays within time limits at our reasoning lengths (B0 and Phase 04).
 4. Whether the judge agrees with humans well enough (EVALUATION_CONTRACT §5 threshold), or needs a stronger or different judge model (Phase 05).
 
 ## 13. Sources (verified 2026-10-27)
 
+Loader compatibility source S18 was verified on **2026-10-28**; other source dates remain as recorded.
+
 | ID | Source | Used for |
 |---|---|---|
 | S1 | https://dev.meta.ai/models/muse-glimmer | model positioning, Apache 2.0, benchmarks (Meta-reported) |
 | S2 | https://dev.meta.ai/docs/muse-glimmer | 30B dense, text+image in / text out, 128K default context, launch partners |
-| S3 | https://dev.meta.ai/docs/muse-glimmer/deploy | runtimes, ~60 GB BF16 weights and ~72 GB VRAM to serve, BF16 hardware list (incl. RTX PRO 6000 96 GB), Transformers recipe (`AutoModelForCausalLM`, `dtype=torch.bfloat16`, `eos_token_id` = `<|eot|>`, `<|end_of_text|>`), sampling defaults, no greedy, never stop on `<|eom|>`, tool parsing, Together model string/prices, 32,768 output cap |
+| S3 | https://dev.meta.ai/docs/muse-glimmer/deploy | runtimes, ~60 GB BF16 weights and ~72 GB VRAM to serve, BF16 hardware list (incl. RTX PRO 6000 96 GB), Transformers recipe (`dtype=torch.bfloat16`, `eos_token_id` = `<|eot|>`, `<|end_of_text|>`), sampling defaults, no greedy, never stop on `<|eom|>`, tool parsing, Together model string/prices, 32,768 output cap. Its `AutoModelForCausalLM` example conflicts with the native mappings in 5.15.0 and 5.20.2; B0 uses S18's registered multimodal factory (§5.8, finding dated 2026-10-28) |
 | S4 | https://dev.meta.ai/docs/muse-glimmer/prompting | chat template, `to=self` reasoning and `to=user` answer messages, special tokens, ATEM tool calls, one tool call per turn, `reasoning_strength` (default `high`), sampling `top_k 64` |
 | S5 | https://dev.meta.ai/docs/overview | Meta Model API does not serve Glimmer |
 | S6 | https://www.together.ai/models/muse-glimmer | endpoint, pricing, FP8, serverless + dedicated |
@@ -614,6 +616,7 @@ Open questions (resolved in later phases, not blocking Phase 02):
 | S15 | https://dev.meta.ai/docs/muse-glimmer/get-the-model | BF16 safetensors repository contents, ~60 GB, no API key and no gated access, Transformers ≥ 5.15 required (earlier versions lack the native path) |
 | S16 | https://huggingface.co/meta-models/Muse-Glimmer-30B | Apache 2.0, ~29.6B parameters including a ~1.8B perception encoder, `AutoProcessor` + `AutoModelForMultimodalLM` usage example, temperature 1.0 |
 | S17 | https://research.google.com/colaboratory/faq.html | VMs deleted when idle and with a maximum lifetime; up to 12 h (24 h continuous on Pro+ with compute units); resources, GPU types and limits not guaranteed; Drive mounting grants access to the whole Drive; generative AI features collect prompts and outputs |
+| S18 | [Transformers 5.15.0 mappings](https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/auto/modeling_auto.py), [5.20.2 mappings](https://github.com/huggingface/transformers/blob/v5.20.2/src/transformers/models/auto/modeling_auto.py), [5.20.2 native model](https://github.com/huggingface/transformers/blob/v5.20.2/src/transformers/models/muse_glimmer/modeling_muse_glimmer.py) | verified 2026-10-28: native multimodal registration, absence from the CausalLM mapping in both releases, text-only forward inputs and unconditional vision-tower construction. Source inspection is not successful GPU loading or generation |
 | L1 | Local check, founder workstation, 2026-10-27 | Python 3.14.5 / SQLite 3.50.4: FTS5 + Porter available; `verify` matches `verified` |
 | L2 | Founder-run Colab preflight, 2026-10-27 ([PROVENANCE §5a](docs/PROVENANCE.md#5a-colab-preflight-observations-founder-run)) | Transformers 5.20.2 loaded config, tokenizer, chat template and processor (CPU runtime); a separate runtime showed CUDA, an RTX PRO 6000 Blackwell, 94.43 / 94.97 GiB free/total VRAM, 193.17 GiB free disk, PyTorch 2.11.0+cu130. No weights loaded, no generation |
 
