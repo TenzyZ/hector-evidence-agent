@@ -5,11 +5,10 @@ By **WEIGHTWRIGHT Research** for the Meta Global AI Developer Hackathon 2026 (St
 
 Hector Evidence Agent is WEIGHTWRIGHT's first product and the canonical home of its Hector research. Earlier Hector research lives in a private repository; none of its code, data or reports is included here. See [docs/PROVENANCE.md](docs/PROVENANCE.md).
 
-> **Status (2026-10-27): Phase 01, architecture and specifications.**
-> - **Done:** the architecture and evaluation specifications in this repository.
-> - **Done, outside this repository (founder-run):** a Google Colab preflight that loaded Muse Glimmer's configuration, tokenizer, chat template and processor, and a separate check that a Colab GPU runtime was available. See [PROVENANCE §5a](docs/PROVENANCE.md#5a-colab-preflight-observations-founder-run).
-> - **Planned next (Phase 01b):** the first baseline, **B0**. It runs Muse Glimmer 30B in BF16 on a Google Colab GPU against 16 labeled questions.
-> - **Not done:** no model weights have been loaded and no text has been generated. No evaluation has been run, and there is no application code yet.
+> **Status (2026-10-28): Phase 02 local implementation; independent review pending.**
+> - **Available:** stdlib `.txt`/`.md` ingestion, SQLite FTS5 search, and Configuration A validation/evaluation. Use `python -m hector`; see [Phase 02](docs/PHASE_PLAN.md#phase-02--ingestion-retrieval-cli-eval-harness-config-a) for fixture commands.
+> - **B0:** the Phase 01b harness and archived baseline evidence are preserved in this repository.
+> - **Pending:** Phase 03 production evaluation data and G1, agent/model integration, evidence verification, and UI. Fixture retrieval scores do not establish production quality.
 
 ## The idea
 

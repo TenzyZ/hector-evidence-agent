@@ -1,4 +1,15 @@
-"""B0 limits from ARCHITECTURE sections 5.8 and 7."""
+"""Limits from ARCHITECTURE sections 5.1, 5.2, 5.8 and 7."""
+
+ALLOWED_EXTENSIONS = (".txt", ".md")
+MAX_FILE_BYTES = 2 * 1024 * 1024
+MAX_DOCUMENTS = 20
+MAX_CORPUS_BYTES = 10 * 1024 * 1024
+CHUNK_MAX_CHARS = 1200
+QUESTION_CHARS = (3, 500)
+PRESEED_K = 5
+SEARCH_K_DEFAULT = 5
+SEARCH_K_MAX = 8
+QUERY_MAX_TERMS = 16
 
 B0_MIN_FREE_VRAM_GIB = 72
 B0_MIN_HOST_RAM_GIB = 24  # WEIGHTWRIGHT heuristic, not a Meta loading guarantee.
