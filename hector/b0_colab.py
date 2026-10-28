@@ -342,19 +342,21 @@ class B0Run:
         self.stages.pop("preflight")
         self.preflight()
         import torch
-        from transformers import AutoModelForCausalLM
 
         self.gpu_started = time.monotonic()
         started = time.perf_counter()
         try:
+            from transformers import AutoModelForMultimodalLM
+
             torch.cuda.reset_peak_memory_stats(0)
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = AutoModelForMultimodalLM.from_pretrained(
                 MODEL_ID, revision=MODEL_REVISION, dtype=torch.bfloat16, device_map={"": 0},
                 token=False, trust_remote_code=False)
             evidence = assert_model(self.model, torch)
             self.model.eval()
             torch.cuda.synchronize(0)
-            evidence.update(load_time_s=time.perf_counter() - started, **gpu_metrics(torch),
+            evidence.update(model_class=type(self.model).__name__,
+                            load_time_s=time.perf_counter() - started, **gpu_metrics(torch),
                             allocated_after_load_bytes=torch.cuda.memory_allocated(0),
                             reserved_after_load_bytes=torch.cuda.memory_reserved(0))
         except Exception as error:
